@@ -1,49 +1,75 @@
-// netlify/edge-functions/proxy.js
+// edge-functions/proxy.js
 
-// Read the backend URL from environment variables,
-// fallback value is just a placeholder – you must set it in Netlify.
-const BACKEND_URL = Netlify.env.get("BACKEND_URL") || "https://your-backend-server.com";
+// جایگزین TARGET_DOMAIN با BACKEND_URL یا هر نام دلخواه
+const TARGET_BASE = (() => {
+  const domain = Netlify.env.get("TARGET_DOMAIN");
+  return domain ? domain.replace(/\/$/, "") : "";
+})();
+
+const STRIP_HEADERS = new Set([
+  "host",
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "forwarded",
+  "x-forwarded-host",
+  "x-forwarded-proto",
+  "x-forwarded-port",
+  // هدرهای داخل Netlify (در صورت وجود)
+  "x-nf-request-id",
+  "x-nf-client-ip",
+  "x-nf-deployment-id",
+  "x-nf-site-id",
+]);
 
 export default async function handler(request, context) {
+  if (!TARGET_BASE) {
+    return new Response("Misconfigured: TARGET_DOMAIN is not set", { status: 500 });
+  }
+
   try {
     const url = new URL(request.url);
-    // Keep the original path + query string
-    const targetPath = url.pathname + url.search;
-    const upstreamUrl = new URL(targetPath, BACKEND_URL).toString();
+    // مسیر + کوئری را به همان شکل به دامنهٔ مقصد می‌چسبانیم
+    const targetUrl = TARGET_BASE + url.pathname + url.search;
 
-    // Copy headers from the incoming request
-    const headers = new Headers(request.headers);
-    headers.delete("host");
-    headers.delete("x-forwarded-proto");
-    headers.delete("x-forwarded-host");
-
-    // Build the request to your backend – the body is streamed directly
-    const upstreamRequest = new Request(upstreamUrl, {
-      method: request.method,
-      headers: headers,
-      body: request.body,   // ReadableStream, no buffering
-      redirect: "manual",
-    });
-
-    // Forward the request
-    const upstreamResponse = await fetch(upstreamRequest);
-
-    // Prepare response headers, drop hop‑by‑hop headers
-    const responseHeaders = new Headers();
-    for (const [key, value] of upstreamResponse.headers.entries()) {
-      if (!["transfer-encoding", "connection", "keep-alive"].includes(key.toLowerCase())) {
-        responseHeaders.set(key, value);
+    // کپی و پالایش هدرها
+    const outHeaders = new Headers();
+    let clientIp = null;
+    for (const [key, value] of request.headers) {
+      if (STRIP_HEADERS.has(key.toLowerCase())) continue;
+      if (key.toLowerCase().startsWith("x-vercel-")) continue; // فقط در صورت وجود
+      if (key.toLowerCase() === "x-real-ip") {
+        clientIp = value;
+        continue;
       }
+      if (key.toLowerCase() === "x-forwarded-for") {
+        if (!clientIp) clientIp = value;
+        continue;
+      }
+      outHeaders.set(key, value);
+    }
+    if (clientIp) {
+      outHeaders.set("x-forwarded-for", clientIp);
     }
 
-    // Return the upstream response, its body remains a ReadableStream
-    return new Response(upstreamResponse.body, {
-      status: upstreamResponse.status,
-      statusText: upstreamResponse.statusText,
-      headers: responseHeaders,
+    const method = request.method;
+    const hasBody = method !== "GET" && method !== "HEAD";
+
+    // ارسال درخواست به سرور مقصد
+    return await fetch(targetUrl, {
+      method,
+      headers: outHeaders,
+      body: hasBody ? request.body : undefined,
+      duplex: "half",
+      redirect: "manual",
     });
-  } catch (error) {
-    console.error("Proxy error:", error);
-    return new Response(`Proxy Error: ${error.message}`, { status: 502 });
+  } catch (err) {
+    console.error("Relay error:", err);
+    return new Response("Bad Gateway: Tunnel Failed", { status: 502 });
   }
 }
