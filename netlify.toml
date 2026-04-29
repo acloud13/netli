@@ -1,8 +1,8 @@
 [build]
   command = ""
   publish = "."
-  edge_functions = "edge-functions"   
+  edge_functions = "edge-functions"
 
 [[edge_functions]]
   path = "/*"
-  function = "proxy"
+  function = "proxy"   # باید با نام فایل (بدون پسوند) یکسان باشد
